@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Проект slmnetGPT</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; color: #1c1e21; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 700px; }
+        h1, h2, h3 { text-align: center; color: #1877f2; margin-top: 5px; margin-bottom: 15px;}
+        h3 { color: #4b5f77; }
+        button { background-color: #1877f2; color: white; border: none; padding: 10px 15px; border-radius: 6px; font-size: 16px; cursor: pointer; transition: background-color 0.2s; }
+        button:hover { background-color: #166fe5; }
+        button:disabled { background-color: #a0bdf0; cursor: not-allowed; }
+        input[type="text"] { width: calc(100% - 24px); padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 16px; }
+        pre { background-color: #f0f2f5; padding: 10px; border-radius: 6px; white-space: pre-wrap; word-wrap: break-word; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace; font-size: 14px; margin-top: 5px; }
+        .controls { display: flex; gap: 10px; margin-bottom: 20px; align-items: center; }
+        .controls input { flex-grow: 1; }
+        #chat-window { min-height: 200px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; margin-bottom: 20px; border-radius: 6px; }
+        #chat-window pre { margin-top: 0; margin-bottom: 8px; background-color: #fff; }
+        #log-container { max-height: 150px; overflow-y: auto; border: 1px solid #ddd; padding: 5px; border-radius: 6px; }
+        hr { border: none; border-top: 1px solid #ddd; margin: 25px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>slmnetGPT</h1>
+        <h2>Проект GPT в браузере на клиенте</h2>
+        
+        <div id="chat-window">
+            <pre><b>Бот:</b> Привет! Моя личность теперь стабильна.</pre>
+        </div>
+
+        <div class="controls">
+            <input id="user-input" type="text" placeholder="Ваше сообщение...">
+            <button id="send-btn">Отправить</button>
+        </div>
+
+        <hr>
+        <h3>Панель обучения</h3>
+        <p>Когда бот ошибся, введите правильный ответ на его последнюю фразу (<b id="last-phrase">...</b>) и нажмите "Научить".</p>
+        <div class="controls">
+            <input id="correct-response-input" type="text" placeholder="Правильный ответ здесь...">
+            <button id="teach-btn">Научить бота</button>
+        </div>
+        <div id="log-container">
+            <pre id="log-output">Здесь будет отображаться лог дообучения...</pre>
+        </div>
+    </div>
+
+    <script type="module">
+        import slmnet from './slmnet/slmnet.js';
+
+        const ui = {
+            chatWindow: document.getElementById('chat-window'),
+            userInput: document.getElementById('user-input'),
+            sendBtn: document.getElementById('send-btn'),
+            lastPhraseEl: document.getElementById('last-phrase'),
+            correctResponseInput: document.getElementById('correct-response-input'),
+            teachBtn: document.getElementById('teach-btn'),
+            logOutput: document.getElementById('log-output')
+        };
+
+        let model;
+        let vocab = {};
+        let responseBank = [];
+        let memory = []; 
+        let lastUserPhrase = "";
+
+        function vectorizeInput(text, vocabulary) {
+            const vector = new Float32Array(Object.keys(vocabulary).length).fill(0);
+            text.toLowerCase().split(/\s+/).forEach(word => {
+                if (vocabulary.hasOwnProperty(word)) vector[vocabulary[word]] = 1;
+            });
+            return slmnet.Tensor.from([Array.from(vector)]);
+        }
+
+        function vectorizeTarget(text, responseDictionary) {
+            const vector = new Float32Array(responseDictionary.length).fill(0);
+            const index = responseDictionary.indexOf(text.toLowerCase());
+            if (index !== -1) vector[index] = 1;
+            return slmnet.Tensor.from([Array.from(vector)]);
+        }
+        
+        function devectorize(vectorTensor, dictionary) {
+            const data = vectorTensor.data;
+            if (data.length === 0) return "Я не знаю, что ответить.";
+            let maxIndex = 0;
+            for (let i = 1; i < data.length; i++) {
+                if (data[i] > data[maxIndex]) maxIndex = i;
+            }
+            return dictionary[maxIndex] || "Я запутался...";
+        }
+        
+        function saveBrain() {
+            if (!model) return;
+            const params = model.parameters().map(p => ({ shape: p.shape, data: Array.from(p.data) }));
+            localStorage.setItem('slmnet_v3_params', JSON.stringify(params));
+            localStorage.setItem('slmnet_v3_brain_state', JSON.stringify({ vocab, responseBank, memory }));
+            console.log("Мозг v3.2 сохранен!");
+        }
+        
+        function createModel(vocabSize, responseCount) {
+             return new slmnet.layers.Sequential([
+                new slmnet.layers.Dense(vocabSize, 32),
+                new slmnet.layers.ReLU(),
+                new slmnet.layers.Dense(32, responseCount),
+                new slmnet.layers.Sigmoid()
+            ]);
+        }
+
+        function recreateAndTransferModel(oldModel, newVocabSize, newResponseCount) {
+            console.log("Выполняется пересадка мозга (сохранение знаний)...");
+            const newModel = createModel(newVocabSize, newResponseCount);
+            const oldParams = oldModel.parameters();
+            const newParams = newModel.parameters();
+
+            for (let i = 0; i < oldParams.length; i++) {
+                const [oldRows, oldCols] = oldParams[i].shape;
+                const [newRows, newCols] = newParams[i].shape;
+                for (let r = 0; r < Math.min(oldRows, newRows); r++) {
+                    for (let c = 0; c < Math.min(oldCols, newCols); c++) {
+                        newParams[i].data[r * newCols + c] = oldParams[i].data[r * oldCols + c];
+                    }
+                }
+            }
+            console.log("Пересадка завершена. Старые веса сохранены.");
+            return newModel;
+        }
+        
+        function updateVocab(text) {
+            let updated = false;
+            text.toLowerCase().split(/\s+/).forEach(word => {
+                if (!vocab.hasOwnProperty(word)) {
+                    vocab[word] = Object.keys(vocab).length;
+                    updated = true;
+                }
+            });
+            return updated;
+        }
+
+        async function main() {
+            const savedState = localStorage.getItem('slmnet_v3_brain_state');
+            if (savedState) {
+                const state = JSON.parse(savedState);
+                vocab = state.vocab; responseBank = state.responseBank; memory = state.memory;
+                model = createModel(Object.keys(vocab).length, responseBank.length);
+                const savedParams = localStorage.getItem('slmnet_v3_params');
+                if(savedParams) {
+                   const params_data = JSON.parse(savedParams);
+                   model.parameters().forEach((p, i) => {
+                       if(JSON.stringify(p.shape) === JSON.stringify(params_data[i].shape)) {
+                           p.data.set(params_data[i].data);
+                       }
+                   });
+                   console.log("Мозг v3.2 загружен из памяти.");
+                }
+            } else {
+                console.log("Создание нового мозга v3.2...");
+                memory = [
+                    { input: "привет", output: "здравствуй" },
+                    { input: "как дела", output: "все отлично" },
+                    { input: "пока", output: "до встречи" }
+                ];
+                memory.forEach(m => {
+                    updateVocab(m.input);
+                    updateVocab(m.output);
+                    if(!responseBank.includes(m.output)) responseBank.push(m.output);
+                });
+                model = createModel(Object.keys(vocab).length, responseBank.length);
+                await runTrainingSession(true);
+                saveBrain(); 
+            }
+            
+            ui.sendBtn.addEventListener('click', handleSendMessage);
+            ui.userInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleSendMessage(); });
+            ui.teachBtn.addEventListener('click', handleTeachBot);
+        }
+        
+        function handleSendMessage() {
+            const userText = ui.userInput.value.trim();
+            if (!userText) return;
+            lastUserPhrase = userText;
+            ui.lastPhraseEl.innerHTML = `"${userText}"`;
+            const inputVector = vectorizeInput(userText, vocab);
+            const outputVector = model.forward(inputVector);
+            const botResponse = devectorize(outputVector, responseBank);
+            appendMessage("Вы", userText);
+            appendMessage("Бот", botResponse);
+            ui.userInput.value = "";
+        }
+
+        async function handleTeachBot() {
+            const userPhrase = lastUserPhrase;
+            const correctResponse = ui.correctResponseInput.value.trim();
+            if (!userPhrase || !correctResponse) return;
+
+            const oldVocabSize = Object.keys(vocab).length;
+            const oldResponseBankSize = responseBank.length;
+
+            const vocabUpdated = updateVocab(userPhrase) || updateVocab(correctResponse);
+            let responseBankUpdated = false;
+            if (!responseBank.includes(correctResponse.toLowerCase())) {
+                responseBank.push(correctResponse.toLowerCase());
+                responseBankUpdated = true;
+            }
+
+            memory.push({ input: userPhrase.toLowerCase(), output: correctResponse.toLowerCase() });
+
+            // <<< ГЛАВНОЕ ИСПРАВЛЕНИЕ: ПЕРЕСАЖИВАЕМ МОЗГ, А НЕ СОЗДАЕМ ЗАНОВО >>>
+            if(vocabUpdated || responseBankUpdated) {
+                ui.logOutput.textContent = "Словари расширены. Выполняю пристройку к мозгу...\n";
+                const oldModel = model;
+                model = recreateAndTransferModel(oldModel, Object.keys(vocab).length, responseBank.length);
+            }
+
+            await runTrainingSession();
+            saveBrain();
+            ui.correctResponseInput.value = "";
+        }
+        
+        async function runTrainingSession(isInitial = false) {
+            ui.logOutput.textContent += isInitial ? "Первичное обучение...\n" : "Переобучение на всем опыте...\n";
+            ui.teachBtn.disabled = true;
+
+            const optimizer = new slmnet.optimizers.SGD(model.parameters(), 0.05);
+            const epochs = isInitial ? 100 : 50; // Первое обучение дольше, дообучение - короче
+
+            for (let i = 0; i < epochs; i++) {
+                let totalLoss = 0;
+                const shuffledMemory = memory.sort(() => Math.random() - 0.5);
+
+                for (const mem of shuffledMemory) {
+                    optimizer.zero_grad();
+                    const X = vectorizeInput(mem.input, vocab);
+                    const Y = vectorizeTarget(mem.output, responseBank);
+                    const y_pred = model.forward(X);
+                    const error = y_pred.add(Y.mul(slmnet.Tensor.from([[-1]])));
+                    const loss = error.pow(2).sum();
+                    totalLoss += loss.data[0];
+                    loss.backward();
+                    optimizer.step();
+                }
+
+                if (i % 20 === 0 || i === epochs - 1) {
+                    ui.logOutput.textContent += `Эпоха ${i}, Средняя ошибка: ${(totalLoss / memory.length).toFixed(5)}\n`;
+                }
+            }
+            ui.logOutput.textContent += "Обучение завершено!\n";
+            ui.teachBtn.disabled = false;
+        }
+
+        function appendMessage(sender, text) {
+            const message = document.createElement('pre');
+            message.innerHTML = `<b>${sender}:</b> ${text}`;
+            ui.chatWindow.appendChild(message);
+            ui.chatWindow.scrollTop = ui.chatWindow.scrollHeight;
+        }
+
+        main();
+    </script>
+</body>
+</html>
