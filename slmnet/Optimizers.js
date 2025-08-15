@@ -1,12 +1,8 @@
 /**
  * @file slmnet/Optimizers.js
- * @description slmnetGPT v1.0 - Алгоритмы оптимизации для обучения моделей.
+ * @description slmnetGPT v2.0 - Алгоритмы оптимизации для обучения моделей.
  */
 
-/**
- * Базовый класс для всех оптимизаторов.
- * В этой версии он не делает ничего, но служит для единства архитектуры.
- */
 class Optimizer {
     constructor(parameters, learning_rate) {
         if (parameters === undefined || learning_rate === undefined) {
@@ -21,11 +17,7 @@ class Optimizer {
     }
 
     zero_grad() {
-        // Проходимся по всем обучаемым параметрам модели...
         for (const p of this.parameters) {
-            // ...и заполняем их тензоры градиентов нулями.
-            // Это необходимо делать перед каждым новым вычислением градиентов (backward pass),
-            // так как градиенты по умолчанию накапливаются (суммируются).
             if (p.grad) {
                 p.grad.data.fill(0);
             }
@@ -33,29 +25,14 @@ class Optimizer {
     }
 }
 
-
-/**
- * Оптимизатор по алгоритму Стохастического Градиентного Спуска (SGD).
- */
 class SGD extends Optimizer {
-    /**
-     * @param {Tensor[]} parameters - Массив обучаемых тензоров, обычно получается из model.parameters().
-     * @param {number} learning_rate - Скорость обучения (learning rate).
-     */
     constructor(parameters, learning_rate = 0.01) {
         super(parameters, learning_rate);
     }
 
-    /**
-     * Выполняет один шаг оптимизации.
-     * Обновляет каждый параметр по формуле: param = param - learning_rate * param.grad
-     */
     step() {
-        // Проходимся по всем обучаемым параметрам модели (весам, смещениям).
         for (const p of this.parameters) {
             if (p.grad) {
-                // Обновляем данные самого тензора, вычитая из них градиент,
-                // умноженный на скорость обучения.
                 for (let i = 0; i < p.data.length; i++) {
                     p.data[i] -= this.lr * p.grad.data[i];
                 }
@@ -64,9 +41,60 @@ class SGD extends Optimizer {
     }
 }
 
-// В будущем здесь можно будет добавить и другие оптимизаторы, например, Adam.
-// class Adam extends Optimizer { ... }
+
+/**
+ * НОВЫЙ ОПТИМИЗАТОР: Adam (Adaptive Moment Estimation)
+ */
+class Adam extends Optimizer {
+    constructor(parameters, learning_rate = 0.001, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8) {
+        super(parameters, learning_rate);
+        this.beta1 = beta1;
+        this.beta2 = beta2;
+        this.epsilon = epsilon;
+        this.t = 0; // Счетчик шагов
+
+        // Инициализируем буферы для каждого параметра
+        this.m = new Map(); // Первый момент (скользящее среднее градиентов)
+        this.v = new Map(); // Второй момент (скользящее среднее квадратов градиентов)
+
+        for (const p of this.parameters) {
+            this.m.set(p, new Float32Array(p.size).fill(0));
+            this.v.set(p, new Float32Array(p.size).fill(0));
+        }
+    }
+
+    step() {
+        this.t++;
+
+        for (const p of this.parameters) {
+            if (p.grad) {
+                const m_prev = this.m.get(p);
+                const v_prev = this.v.get(p);
+                const grad_data = p.grad.data;
+
+                for (let i = 0; i < p.data.length; i++) {
+                    const g = grad_data[i];
+
+                    // Обновляем первый момент (m)
+                    const m_t = this.beta1 * m_prev[i] + (1 - this.beta1) * g;
+                    m_prev[i] = m_t;
+
+                    // Обновляем второй момент (v)
+                    const v_t = this.beta2 * v_prev[i] + (1 - this.beta2) * (g * g);
+                    v_prev[i] = v_t;
+                    
+                    // Коррекция смещения (bias correction)
+                    const m_hat = m_t / (1 - Math.pow(this.beta1, this.t));
+                    const v_hat = v_t / (1 - Math.pow(this.beta2, this.t));
+
+                    // Обновляем параметр
+                    p.data[i] -= this.lr * m_hat / (Math.sqrt(v_hat) + this.epsilon);
+                }
+            }
+        }
+    }
+}
 
 
-// Экспортируем классы оптимизаторов
-export { SGD };
+// Экспортируем оба класса
+export { SGD, Adam };

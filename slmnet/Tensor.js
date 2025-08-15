@@ -1,6 +1,6 @@
 /**
  * @file slmnet/Tensor.js
- * @description slmnetGPT v1.0 - Фундаментальный N-мерный контейнер данных.
+ * @description slmnetGPT v2.0 - Фундаментальный N-мерный контейнер данных.
  * Это "умный" узел графа, способный хранить градиент и запускать
  * обратное распространение ошибки.
  */
@@ -18,18 +18,8 @@ class Tensor {
         this.size = this.data.length;
 
         // --- Ключевые свойства для обучения ---
-
-        // Флаг, указывающий, что для этого тензора нужно вычислять и накапливать градиент.
-        // Обычно true для весов и смещений модели.
         this.requires_grad = requires_grad;
-        
-        // Градиент - это тоже тензор, такой же формы, изначально заполненный нулями.
-        // Он создается только для тех тензоров, которые этого требуют.
         this.grad = this.requires_grad ? Tensor.zeros(this.shape) : null;
-        
-        // Контекст для построения графа вычислений в обратном порядке.
-        // Хранит информацию об операции, которая создала этот тензор,
-        // и функцию для вычисления градиента (backward).
         this._ctx = ctx;
     }
 
@@ -45,9 +35,6 @@ class Tensor {
             throw new Error("Backward() можно вызывать только для скалярного тензора (например, loss-тензора с одним элементом).");
         }
         
-        // --- Этап 1: Построение графа и его топологическая сортировка ---
-        // Мы должны обойти все "предки" этого тензора, чтобы вычислить их градиенты
-        // в правильном порядке: от конца к началу.
         const buildGraph = (tensor, visited, sortedGraph) => {
             if (visited.has(tensor)) return;
             visited.add(tensor);
@@ -61,19 +48,11 @@ class Tensor {
         const visited = new Set();
         const sortedGraph = [];
         buildGraph(this, visited, sortedGraph);
-
-        // --- Этап 2: Обратный проход по графу ---
         
-        // Градиент самого себя (dLoss/dLoss) равен 1.
         this.grad = Tensor.ones(this.shape);
         
-        // Идем по отсортированному графу в обратном порядке.
         for (let i = sortedGraph.length - 1; i >= 0; i--) {
             const tensor = sortedGraph[i];
-            
-            // Если у тензора есть контекст и функция backward, вызываем ее.
-            // Эта функция вычислит градиенты для "родителей" (inputs) этого тензора
-            // и добавит их к свойству .grad родителей.
             if (tensor._ctx && typeof tensor._ctx.backward === 'function') {
                 tensor._ctx.backward(tensor.grad);
             }
@@ -129,6 +108,26 @@ class Tensor {
         };
         flatten(arr);
         return { flatData, inferredShape };
+    }
+
+    // --- Методы для манипуляции данными (не создают узлы графа) ---
+    
+    /**
+     * Изменяет форму тензора без изменения данных.
+     * @param {number[]} new_shape 
+     * @returns {Tensor} - Новый тензор с той же памятью данных.
+     */
+    reshape(new_shape) {
+        const new_size = new_shape.reduce((a, b) => a * b, 1);
+        if (this.size !== new_size) {
+            throw new Error(`Невозможно изменить форму с [${this.shape}] (размер ${this.size}) на [${new_shape}] (размер ${new_size}).`);
+        }
+        // Возвращаем новый тензор, но он "смотрит" на те же данные и градиент.
+        // Это "глупая" операция, которая не должна быть в графе сама по себе.
+        // Она используется внутри других операций.
+        const reshaped = new Tensor(this.data, new_shape, this.requires_grad);
+        reshaped.grad = this.grad; // Градиент тоже должен быть связан!
+        return reshaped;
     }
 
     // --- Методы для отладки ---

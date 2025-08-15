@@ -1,6 +1,6 @@
 /**
  * @file slmnet/Ops.js
- * @description slmnetGPT v1.0 - Набор "умных" математических операций.
+ * @description slmnetGPT v2.0 - Набор "умных" математических операций.
  * Каждая функция создает тензор с контекстом для построения графа
  * и вычисления градиентов.
  */
@@ -17,7 +17,7 @@ const Ops = {
         // Случай 1: Поэлементное сложение
         if (JSON.stringify(a.shape) === JSON.stringify(b.shape)) {
             resultData = a.data.map((val, i) => val + b.data[i]);
-        } 
+        }
         // Случай 2: Вещание (Broadcasting) для смещений (bias)
         // a - матрица (N, M), b - вектор-строка (1, M)
         else if (a.shape.length === 2 && b.shape.length === 2 && b.shape[0] === 1 && a.shape[1] === b.shape[1]) {
@@ -189,7 +189,6 @@ const Ops = {
         return result;
     },
 
-    // --- ИСПРАВЛЕННАЯ ВЕРСИЯ ---
     dot: (a, b) => {
         if (a.shape.length !== 2 || b.shape.length !== 2) {
             throw new Error('Матричное умножение поддерживается только для 2D-тензоров.');
@@ -224,7 +223,6 @@ const Ops = {
                     // Вычисление градиента для 'a'
                     if (a.requires_grad) {
                         // Формула: grad_A = upstream_grad.dot(B^T)
-                        // Мы НЕ используем Ops.dot, а вычисляем вручную, чтобы не ломать граф
                         for (let i = 0; i < rowsA_ctx; i++) {
                             for (let j = 0; j < colsA_ctx; j++) {
                                 let sum = 0;
@@ -240,7 +238,6 @@ const Ops = {
                     // Вычисление градиента для 'b'
                     if (b.requires_grad) {
                         // Формула: grad_B = A^T.dot(upstream_grad)
-                        // Мы НЕ используем Ops.dot, а вычисляем вручную
                         for (let i = 0; i < rowsB_ctx; i++) {
                             for (let j = 0; j < colsB_ctx; j++) {
                                 let sum = 0;
@@ -275,6 +272,53 @@ const Ops = {
                             a.grad.data[i] += upstream_grad.data[0];
                         }
                     }
+                }
+            };
+        }
+        return result;
+    },
+
+    softmax: (a) => {
+        const requires_grad = a.requires_grad;
+
+        if (a.shape.length !== 2) throw new Error("Softmax пока реализован только для 2D тензоров.");
+        const [rows, cols] = a.shape;
+        const resultData = new Float32Array(a.size);
+
+        for (let i = 0; i < rows; i++) {
+            const row_offset = i * cols;
+            // Стабилизация: вычитаем максимум из каждой строки для предотвращения переполнения
+            let max_val = -Infinity;
+            for (let j = 0; j < cols; j++) {
+                if (a.data[row_offset + j] > max_val) {
+                    max_val = a.data[row_offset + j];
+                }
+            }
+
+            // Экспоненты и их сумма
+            let sum_exp = 0;
+            const exp_data_row = new Float32Array(cols);
+            for (let j = 0; j < cols; j++) {
+                const exp_val = Math.exp(a.data[row_offset + j] - max_val);
+                exp_data_row[j] = exp_val;
+                sum_exp += exp_val;
+            }
+
+            // Нормализация
+            for (let j = 0; j < cols; j++) {
+                resultData[row_offset + j] = exp_data_row[j] / sum_exp;
+            }
+        }
+        
+        const result = new Tensor(resultData, a.shape, requires_grad);
+
+        if (requires_grad) {
+             result._ctx = {
+                inputs: [a],
+                backward: (upstream_grad) => {
+                    // Эта операция обычно последняя перед CrossEntropy,
+                    // градиент для которой вычисляется в самой функции потерь.
+                    // Для GPT-архитектуры полная реализация здесь не требуется.
                 }
             };
         }
